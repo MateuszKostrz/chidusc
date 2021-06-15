@@ -1,0 +1,1051 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(stringr)
+library(stargazer)
+library(purrr)
+library(strex)
+library(xtable)
+library(readxl)
+library(openxlsx)
+library(factoextra)
+library(tidytext)
+library(car)
+library(flexmix)
+library(tidyr)
+library(stringi)
+library(readr)
+library(lubridate)
+library(clusterCrit)
+library(DAAG)
+library(Hmisc)
+library(caret)
+```
+
+
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("~/Desktop/MASTER THESIS/Data")) 
+```
+
+
+# Data cleaning
+```{r}
+otomoto$account <- NULL
+otomoto[,12:14] <- NULL
+otomoto[,18:20] <- NULL
+otomoto[,19:22] <- NULL
+otomoto[,11] <- NULL
+
+otomoto$title2 <- tolower(otomoto$title)
+otomoto$title2 <- gsub("[[:punct:][:blank:]]+", " ", otomoto$title2)
+```
+
+
+
+
+```{r}
+#otomoto <- read.csv("oto2.csv")
+#otomoto <- read.csv("otzi.csv")
+
+otomoto <- read.csv("otomoto_19.csv")
+```
+
+## DESC STATS
+```{r}
+desc_otomoto <- psych::describe(otomoto)
+desc_otomoto <- desc_otomoto %>% select(n, mean, sd, min, max)
+xtable(desc_otomoto)
+```
+
+
+# Dividing the highest entry in each listing's daily views by the difference in the number of days between posting and its first observation in the dataset.
+```{r}
+oto_check <- otomoto
+oto_check$create_date2 <- sub(" .*", "", oto_check$create_date)
+oto_check$ad_date <- sub(" .*", "", oto_check$ad_creation_date)
+oto_check <- oto_check %>% mutate(create_date2 = ymd(create_date2))
+oto_check <- oto_check %>% mutate(ad_date = ymd(ad_date))
+oto_check$difference <- oto_check$create_date2 - oto_check$ad_date
+oto_check <- subset(oto_check, oto_check$difference > 0)
+
+
+
+oto_mins <- oto_check %>% group_by(ad_id) %>% slice(which.max(otomoto_daily_visits))
+oto_mins <- oto_mins %>% mutate(create_date2 = ymd_hms(create_date))
+oto_mins <- oto_mins %>% mutate(ad_date = ymd_hms(ad_creation_date))
+oto_mins$diff <- oto_mins$create_date2 - oto_mins$ad_date
+oto_mins$diff_day <- oto_mins$diff / 24
+oto_mins$diff_day <- as.numeric(oto_mins$diff_day)
+oto_mins$daily_views <- oto_mins$otomoto_daily_visits / oto_mins$diff_day
+
+oto_mins2 <- oto_mins
+oto_mins2[3:25] <- NULL
+
+joined <- merge(otomoto, oto_mins2, by = "id", all.x = TRUE)
+joined <- joined %>% arrange(., ad_id, create_date)
+
+joined$daily_views2 <- ifelse(!is.na(joined$daily_views), joined$daily_views, joined$otomoto_daily_visits)
+
+joined$otomoto_daily_visits <- NULL
+colnames(joined)[22] <- "otomoto_daily_visits"
+
+otomoto <- joined
+```
+
+
+
+
+
+# Data Transofrmations
+```{r}
+# Adding car model 
+otomoto$brand <- gsub("\\?", "Š", otomoto$brand)
+otomoto$car_type <- paste0(otomoto$brand, " ")
+otomoto$car_type <- paste0(otomoto$car_type, otomoto$model)
+
+
+# Taking the first seven days for each listing
+otomoto <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(1:7))
+
+
+# Run this for robustness check
+#otomoto <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(1:14))
+```
+
+
+
+
+
+
+## ANALYSIS
+
+# CLUSTERING
+# Creating a variable for horsepower
+```{r}
+# ADDING THE VARIABLE FOR HORSEPOWER
+#clustering <- otomoto %>% group_by(car_type) %>% summarise(price = mean(price))
+#clust_old <- read_excel("~/Desktop/clustering_otomoto.xlsx")
+
+#total <- merge(clustering, clust_old, by = "car_type", all.x = TRUE)
+
+otomoto$before2 <- str_extract(otomoto$title2, ".+?(?=km)")
+
+otomoto$km <- word(otomoto$before2, -1)
+otomoto$km2 <- ifelse(otomoto$km == " ", word(otomoto$before2, -2), otomoto$km)
+
+otomoto$km <- gsub("[[:punct:][:blank:]]+", " ", otomoto$km)
+
+otomoto$km_proper <- as.numeric(otomoto$km)
+otomoto$km_proper <- ifelse(is.na(otomoto$km_proper), word(otomoto$before2, -2), otomoto$km)
+otomoto$km_proper <- as.numeric(otomoto$km_proper)
+
+otomoto$km3 <- stri_sub(otomoto$km2, 3)
+otomoto$km_proper <- ifelse(otomoto$km_proper < 11, parse_number(otomoto$km3), otomoto$km_proper)
+
+
+
+```
+
+
+```{r}
+# FULL CLUSTERING
+
+# Finding all car types
+otomoto_clustering <- otomoto %>% group_by(car_type) %>% summarise(horsepower = mean(km_proper, na.rm = TRUE), price = mean(price))
+
+
+# Matching the dataset with height, lenght and width on car type
+clustering_dimensions <- read_excel("~/Desktop/MASTER THESIS/clustering_join.xlsx")
+clustering_final <- merge(otomoto_clustering, clustering_dimensions, by = "car_type")
+
+otomoto <- merge(otomoto, clustering_final, by = "car_type")
+```
+
+
+
+
+# Getting the final dataset used later for the analysis, grouped by IDs
+```{r}
+otomoto_7 <- otomoto %>% group_by(ad_id)  %>% summarise(brand = min(brand), car_type = min(car_type), price = mean(price.x), create_date = min(create_date), weekly_views = mean(otomoto_daily_visits, na.rm = TRUE), title = max(title), phones = mean(otomoto_daily_phones, na.rm = TRUE), messages = mean(otomoto_daily_messages, na.rm = TRUE), height = mean(Height), length = mean(Length), width = mean(Width), horsepower = mean(km_proper, na.rm = TRUE))
+
+
+
+# Checking how many listings have the same titles
+dist_titles <- otomoto %>% group_by(title) %>% summarise(dist = n_distinct(ad_id))
+```
+
+
+# Run only for robustness checks
+```{r}
+model_robust <- lm(price.x ~ car_type + horsepower, data = otomoto)
+predict_robust <- predict(model_robust, otomoto)
+otomoto_robust <- cbind(otomoto, predict_robust)
+
+set.seed(100)
+clustering <- otomoto_robust[,c(1,29:34)]
+#clustering <- otomoto_7[,c(3,4,15,10:13)]
+clustering <- clustering %>% group_by(car_type) %>% summarise(horsepower = mean(horsepower), price = mean(price.y), height = mean(Height), length = mean(Length), width = mean(Width), price_diff = mean(predict_robust))
+clustering2 <- clustering
+clustering2$car_type <- NULL
+
+scaled_clusters <- scale(select(clustering2, horsepower, price, height, length, width, price_diff))
+
+
+set.seed(10)
+
+results <- kmeans(scaled_clusters, 4)
+
+fviz_cluster(results, data = clustering2,
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+
+results$size
+results$cluster
+results$centers
+
+```
+
+
+
+
+```{r}
+set.seed(100)
+clustering <- otomoto[,c(1,29:33)]
+#clustering <- otomoto_7[,c(3,4,15,10:13)]
+clustering <- clustering %>% group_by(car_type) %>% summarise(horsepower = mean(horsepower), price = mean(price.y), height = mean(Height), length = mean(Length), width = mean(Width))
+clustering2 <- clustering
+clustering2$car_type <- NULL
+
+scaled_clusters <- scale(select(clustering2, horsepower, price, height, length, width))
+```
+
+
+
+```{r}
+# Calinski-Harabasz Index
+clustering3 <- as.matrix(scaled_clusters)
+m <- list()
+for (i in (1:30)){
+  k <- kmeans(scaled_clusters, i, iter.max = 10000, nstart=10)
+  ch <- intCriteria(clustering3, k$cluster, 'Calinski_Harabasz')
+  m[[i]] <- ch
+}
+
+harabsz <- data.frame(matrix(unlist(m), nrow=length(m), byrow=TRUE))
+harabsz$cluster <- seq.int(nrow(harabsz))
+colnames(harabsz)[1] <- "CH"
+har_max <- subset(harabsz, harabsz$CH == max(harabsz$CH, na.rm = TRUE))
+
+ggplot(harabsz, aes(x = cluster, y = CH)) + geom_point() + geom_line() + geom_vline(xintercept = har_max$cluster, color = "red", size=1)  + labs(title = "", x = "Number of Clusters", y = "Calinski-Harabasz Index")
+
+# Elbow method - ggplot
+
+tot_withinss <- map_dbl(1:10,  function(k){
+  model <- kmeans(x = scaled_clusters, centers = k)
+  model$tot.withinss
+})
+ 
+# Generate a data frame containing both k and tot_withinss
+elbow_df <- data.frame(
+  k = 1:10,
+  tot_withinss = tot_withinss
+)
+ 
+ 
+# Plot the elbow plot
+ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+  geom_line() + geom_point()  + geom_vline(xintercept = har_max$cluster, color = "red", size=1) + 
+  scale_x_continuous(breaks = 1:10) + labs(title = "", x = "Number of Clusters", y = "Total Within Sum of Squares")
+
+
+
+
+# Silhouette method
+#fviz_nbclust(scaled_clusters, kmeans, method = "silhouette")+ geom_vline(xintercept = 3, linetype = 2)+
+#  labs(subtitle = "Silhouette method")
+
+
+## The Elbow Method
+#wss <- (nrow(scaled_clusters)-1)*sum(apply(scaled_clusters,2,var))
+#  for (i in 2:15) wss[i] <- sum(kmeans(scaled_clusters,
+                                #       centers=i)$withinss)
+#plot(1:15, wss, type="b", xlab="Number of Clusters",
+#     ylab="Total Within Sum of Squares", main = "Elbow Method")
+```
+
+
+
+
+
+```{r}
+# Final clustering
+
+set.seed(10)
+
+results <- kmeans(scaled_clusters, 4)
+
+fviz_cluster(results, data = clustering2,
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+
+results$size
+results$cluster
+results$centers
+```
+
+```{r}
+table <- table(clustering$car_type, results$cluster)
+table <- as.data.frame((table))
+table2 <- subset(table, table$Freq == 1)
+table2$ID <- seq.int(nrow(table2))
+table2$car_type = table2$Var1
+table2$Var2 <- as.numeric(table2$Var2)
+
+table2 <- table2 %>% group_by(car_type) %>% summarise(cluster = mean(Var2))
+
+joined <- merge(otomoto_7, table2, all.x = TRUE)
+
+otomoto_7 <- joined
+```
+
+
+```{r}
+otomoto_7$title2 <- gsub("[[:punct:][:blank:]]+", " ", otomoto_7$title)
+otomoto_7$title2 <- tolower(otomoto_7$title2)
+otomoto_7$title2 <- gsub("\\ż", "z", otomoto_7$title2)
+otomoto_7$title2 <- gsub("\\ę", "e", otomoto_7$title2)
+otomoto_7$title2 <- gsub("\\ó", "o", otomoto_7$title2)
+```
+
+
+
+## CONSTRUCTION OF INDEPENDENT VARIABLES
+
+# Deleting wrong or incomplete data
+
+```{r}
+otomoto_7 <- subset(otomoto_7, otomoto_7$weekly_views > 0)
+otomoto_7 <- otomoto_7[complete.cases(otomoto_7),]
+```
+
+
+
+# LIST OF WORDS AND PHRASES
+```{r}
+###################### Car related 
+# kamera (cofania), czujniki (parkowania), klimatyzacja, tempomat, nawigacja, navi (together and separately)
+otomoto_7$temp <- grepl("tempoma", otomoto_7$title2)
+otomoto_7$klima <- grepl("klima", otomoto_7$title2)
+otomoto_7$nawi <- grepl("nawi", otomoto_7$title2)
+otomoto_7$navi <- grepl("navi", otomoto_7$title2)
+otomoto_7$czujniki <- grepl("czujnik", otomoto_7$title2)
+otomoto_7$kamera <- grepl("kamera", otomoto_7$title2) - grepl("kamera cofania", otomoto_7$title2)
+otomoto_7$bluetooth <- grepl("bluetooth", otomoto_7$title2)
+otomoto_7$cofanie <- grepl("kamera cofania", otomoto_7$title2)
+otomoto_7$felgi <- grepl("felgi", otomoto_7$title2)
+otomoto_7$four_x_four <- grepl("4x4", otomoto_7$title2)
+otomoto_7$fotel <- grepl("fotel", otomoto_7$title2)
+
+
+
+# Multiple car
+otomoto_7$mult_car <- otomoto_7$temp + otomoto_7$klima + otomoto_7$nawi + otomoto_7$czujniki + otomoto_7$kamera + otomoto_7$bluetooth + otomoto_7$cofanie  + otomoto_7$felgi  + otomoto_7$four_x_four  + otomoto_7$fotel + otomoto_7$navi
+
+otomoto_7$mult_car <- ifelse(otomoto_7$mult_car > 1, otomoto_7$mult_car, 0)
+
+
+
+# Making the categorical variable
+otomoto_7$car <- ifelse(otomoto_7$temp == 1, "tempomat", ifelse(otomoto_7$klima == 1, "klima",ifelse(otomoto_7$nawi == 1, "nawi", ifelse(otomoto_7$czujniki == 1, "czujnik", ifelse(otomoto_7$kamera == 1, "kamera", ifelse(otomoto_7$bluetooth == 1, "bluetooth", ifelse(otomoto_7$cofanie == 1, "cofania", ifelse(otomoto_7$felgi == 1, "felgi", ifelse(otomoto_7$four_x_four == 1, "4x4", ifelse(otomoto_7$fotel == 1, "fotel", ifelse(otomoto_7$navi == 1, "navi", 0)))))))))))
+
+
+otomoto_7$car <- ifelse(otomoto_7$car != 0 & otomoto_7$mult_car == 0, otomoto_7$car, 0)
+otomoto_7$car <- as.character(otomoto_7$car)
+
+####################### Sales related
+# Okazja, rabat, cena, wyprzedaż
+otomoto_7$okazja <- grepl("okazja", otomoto_7$title2)
+otomoto_7$rabat <- grepl("rabat", otomoto_7$title2)
+otomoto_7$cena <- grepl("cena", otomoto_7$title2)
+otomoto_7$wyprzedaz <- grepl("wyprzed", otomoto_7$title2)
+otomoto_7$reka <- grepl("ręki", otomoto_7$title2)
+otomoto_7$reka2 <- grepl("r ki", otomoto_7$title2) 
+otomoto_7$reka3 <- grepl("reki", otomoto_7$title2) 
+otomoto_7$odbior <- grepl("odbior", otomoto_7$title2)
+otomoto_7$wybor <- grepl("wybor", otomoto_7$title2)
+
+
+# Multiple marketing terms -> if there is more than one marketing term then this takes a value of the number of marketing terms
+
+otomoto_7$mult_sales <- otomoto_7$okazja + otomoto_7$rabat + otomoto_7$cena + otomoto_7$wyprzedaz + otomoto_7$reka + otomoto_7$reka2 + otomoto_7$reka3 + otomoto_7$odbior + otomoto_7$wybor
+
+otomoto_7$mult_sales <- ifelse(otomoto_7$mult_sales > 1, otomoto_7$mult_sales, 0)
+
+
+
+
+# Making the categorical variable
+otomoto_7$sales <- ifelse(otomoto_7$okazja == 1, "okazja", ifelse(otomoto_7$rabat == 1, "rabat", ifelse(otomoto_7$cena == 1, "cena",ifelse(otomoto_7$wyprzedaz == 1, "wyprzedaz",ifelse(otomoto_7$reka == 1, "ręki", ifelse(otomoto_7$odbior == 1, "odbior", ifelse(otomoto_7$wybor == 1, "wybor", ifelse(otomoto_7$reka2 == 1, "r ki", ifelse(otomoto_7$reka3 == 1, "reki",0)))))))))
+
+
+otomoto_7$sales <- ifelse(otomoto_7$sales != 0 & otomoto_7$mult_sales == 0, otomoto_7$sales, 0)
+otomoto_7$sales <- as.character(otomoto_7$sales)
+
+
+
+# Checking for balance
+otomoto_7$balance <- ifelse((otomoto_7$sales != 0 & otomoto_7$car != 0) | (otomoto_7$mult_sales == 1 & otomoto_7$car != 0) | (otomoto_7$mult_car == 1 & otomoto_7$sales != 0), 1,0)
+otomoto_7$balance <- as.factor(otomoto_7$balance)
+
+
+# Number of special characters <- number of + | and !
+otomoto_7$exclamation <- str_count(otomoto_7$title, pattern = "!")
+otomoto_7$separation <- str_count(otomoto_7$title, pattern = "\\|")
+otomoto_7$plus <- str_count(otomoto_7$title, pattern = "\\+")
+
+
+
+# Adding the outside of core part as a variable
+otomoto_7$not_core <- sub(".*km ", "", otomoto_7$title2)
+otomoto_7$not_core_length <- nchar(otomoto_7$not_core)
+
+# Finding the position of a word for both car characteristics and marketing terms in the non-core part
+otomoto_7$car2 <- as.character(otomoto_7$car)
+otomoto_7$position_car <- ifelse(otomoto_7$car2 != 0, str_locate(otomoto_7$not_core, otomoto_7$car2),0)
+
+otomoto_7$sales2 <- as.character(otomoto_7$sales)
+otomoto_7$position_sales <- ifelse(otomoto_7$sales2 != 0, str_locate(otomoto_7$not_core, otomoto_7$sales2),0)
+
+otomoto_7$car_rel_pos <- otomoto_7$position_car / otomoto_7$not_core_length
+otomoto_7$sales_rel_pos <- otomoto_7$position_sales / otomoto_7$not_core_length
+
+# Converting 
+otomoto_7$car <- ifelse(otomoto_7$car == "navi", "nawi", otomoto_7$car)
+otomoto_7$sales <- ifelse(otomoto_7$sales == "ręki" | otomoto_7$sales == "r ki", "reki", otomoto_7$sales)
+
+```
+
+
+```{r}
+# Adding the title length as another variable
+otomoto_7$title_length <- nchar(otomoto_7$title)
+
+quantile(otomoto_7$title_length, c(.10, .25, .50, .75, .9))
+
+
+
+```
+
+
+# How many times each predictor occurs
+```{r}
+sums_car_params <- colSums(otomoto_7[,16:26])
+sums_car_params <- as.data.frame(sums_car_params)
+
+sums_mark_terms <- colSums(otomoto_7[,29:37])
+sums_mark_terms <- as.data.frame(sums_mark_terms)
+
+means_spec_cha <- colMeans(otomoto_7[,41:43])
+means_spec_cha <- as.data.frame(means_spec_cha)
+```
+
+
+# Removing outliers
+```{r}
+otomoto_8 <- otomoto_7 %>% filter(between(weekly_views, quantile(weekly_views,.01), quantile(weekly_views,.99)))
+```
+
+
+# First model estimation to check if it satisfies the assumptions
+
+```{r}
+model_full <- lm(weekly_views ~  temp + klima + nawi + czujniki + kamera + bluetooth + cofanie + felgi + four_x_four + fotel + wyprzedaz + cena + rabat + okazja + reka + odbior + wybor  + reka2 + reka3 +  navi + mult_sales + mult_car + balance + exclamation +  separation + plus + log(price) + brand + car_rel_pos + sales_rel_pos + log(title_length), data = otomoto_8)
+```
+
+
+```{r}
+vif <- DAAG::vif(model_full)
+vif <- as.data.frame(vif)
+
+# Including position_car and position_sales causes multicollinearity based on the VIF test. Therefore, these variables were excluded from the main model
+```
+
+
+
+
+# Repeating it but without car_rel_pos and sales_rel_pos and brands
+
+```{r}
+model_full <- lm(log(weekly_views) ~  temp + klima + nawi + czujniki + kamera + bluetooth + cofanie + felgi + four_x_four + fotel + wyprzedaz + cena + rabat + okazja + reka + odbior + wybor + reka2 + reka3 + navi + mult_sales + balance + exclamation +  separation + plus + log(price) + brand + log(title_length), data = otomoto_8)
+```
+
+
+
+```{r}
+vif2 <- DAAG::vif(model_full)
+
+vif2 <- as.data.frame(vif2)
+
+# Now it seems all good - brands still have high VIFs but these are just control variables, all variables of interest are okay
+```
+
+
+```{r}
+# Deleting not needed columns
+otomoto_8$temp <- NULL
+otomoto_8$klima <- NULL
+otomoto_8$nawi <- NULL
+otomoto_8$czujniki <- NULL
+otomoto_8$kamera <- NULL
+otomoto_8$bluetooth <- NULL
+otomoto_8$cofanie <- NULL
+otomoto_8$felgi <- NULL
+otomoto_8$four_x_four <- NULL
+otomoto_8$fotel <- NULL
+otomoto_8$wyprzedaz <- NULL
+otomoto_8$cena <- NULL
+otomoto_8$rabat <- NULL
+otomoto_8$okazja <- NULL
+otomoto_8$reka <- NULL
+otomoto_8$odbior <- NULL
+otomoto_8$wybor <- NULL
+otomoto_8$reka2 <- NULL
+otomoto_8$reka3 <- NULL
+otomoto_8$navi <- NULL
+otomoto_8$sales2 <- NULL
+otomoto_8$car2 <- NULL
+otomoto_8$position_car <- NULL
+otomoto_8$position_sales <- NULL
+```
+
+
+# Construction correlation plots and descriptive stats table
+
+```{r}
+# Getting just numerical variables
+otomoto_num <- otomoto_8
+
+otomoto_num$avg_daily_visits <- otomoto_num$weekly_views
+otomoto_num$weekly_views <- NULL
+
+otomoto_num$car_type <- NULL
+otomoto_num$ad_id <- NULL
+otomoto_num$brand <- NULL
+otomoto_num$create_date <- NULL
+otomoto_num$title <- NULL
+otomoto_num$phones <- NULL
+otomoto_num$messages <- NULL
+otomoto_num$log_price <- NULL
+otomoto_num$cluster <- NULL
+otomoto_num$title2<- NULL
+#otomoto_num$mult_car<- NULL
+otomoto_num$car<- NULL
+#otomoto_num$mult_sales<- NULL
+otomoto_num$sales<- NULL
+otomoto_num$balance<- NULL
+otomoto_num$not_core<- NULL
+otomoto_num$not_core_length<- NULL
+otomoto_num$balance<- NULL
+otomoto_num$not_core<- NULL
+#otomoto_num$car_rel_pos <- NULL 
+#otomoto_num$sales_rel_pos <- NULL
+otomoto_num$log_views <- NULL
+otomoto_num$price_scaled <- NULL
+otomoto_num$title_length2 <- NULL
+otomoto_num$horsepower <- NULL
+otomoto_num$height <- NULL
+otomoto_num$width <- NULL
+otomoto_num$length <- NULL
+
+
+# Correlation Table
+otomoto_num2 <- subset(otomoto_num, otomoto_num$sales_rel_pos >= 0 & otomoto_num$car_rel_pos >= 0)
+cor <- cor(otomoto_num2)
+xtable(cor)
+
+
+
+# Descriptive Statistics Table
+otomoto_num2$mult_car <- NULL
+otomoto_num2$car_rel_pos <- NULL
+otomoto_num2$sales_rel_pos <- NULL
+
+desc_otomoto <- psych::describe(otomoto_num2)
+xtable(desc_otomoto)
+```
+
+
+
+
+
+# Checking for the distribution of the dependent variable
+
+```{r}
+hist(otomoto_8$weekly_views,
+main="Average daily visits for the first 7 days",
+xlab="Average Daily Visits",
+xlim=c(0,200)
+)
+
+# Right skewed - log transformation to fix it in the next step
+```
+
+
+```{r}
+otomoto_8$log_views <- log(otomoto_8$weekly_views)
+hist(otomoto_8$log_views,
+main="Average daily visits for the first 7 days",
+xlab="log(Average Daily Visits)",
+xlim=c(0,6)
+)
+
+# Normally distributed now
+```
+
+# New model after all transformations
+
+```{r}
+model_full <- lm(log(weekly_views) ~  sales + car + mult_sales + balance + exclamation + separation + plus + log(price) + log(title_length) +  brand, data = otomoto_8)
+```
+
+
+# Checking other assumptions of linear regression
+```{r}
+par(mfrow = c(2, 2))
+plot(model_full)
+```
+
+
+# Final variable construction
+```{r}
+otomoto_8 <- subset(otomoto_8, otomoto_8$sales_rel_pos >= 0 & otomoto_8$car_rel_pos >= 0)
+
+otomoto_8$not_core_length <- NULL
+otomoto_8$position_car <- NULL
+otomoto_8$position_sales <- NULL
+otomoto_8$car_rel_pos <- NULL
+otomoto_8$sales_rel_pos <- NULL
+otomoto_8$log_views <- NULL
+
+otomoto_8$title_length2 <- otomoto_8$title_length^2
+otomoto_8$cluster <- as.character(otomoto_8$cluster)
+```
+
+
+```{r}
+# Changing variable names for marketing terms
+otomoto_8 %>% group_by(sales) %>% count()
+
+otomoto_8$marketing_term <- ifelse(otomoto_8$sales == "wyprzedaz", "sale", ifelse(otomoto_8$sales == "cena", "price", ifelse(otomoto_8$sales == "rabat","discount", ifelse(otomoto_8$sales == "odbior", "pick_up", ifelse(otomoto_8$sales == "okazja", "deal", ifelse(otomoto_8$sales == "reki", "available_now", ifelse(otomoto_8$sales == "wybor", "choice", 0)))))))
+
+otomoto_8 %>% group_by(marketing_term) %>% count()
+
+# Changing variable names for car characteristics
+
+otomoto_8 %>% group_by(car) %>% count()
+
+otomoto_8$car_characteristic <- ifelse(otomoto_8$car == "cofania", "reverse", ifelse(otomoto_8$car == "czujnik", "sensor", ifelse(otomoto_8$car == "felgi","rims", ifelse(otomoto_8$car == "fotel", "seats", ifelse(otomoto_8$car == "kamera", "camera", ifelse(otomoto_8$car== "klima", "a/c", ifelse(otomoto_8$car == "nawi", "gps", ifelse(otomoto_8$car == "tempomat", "cruise_control", otomoto_8$car))))))))
+
+otomoto_8 %>% group_by(car_characteristic) %>% count()
+
+```
+
+
+
+
+
+
+
+## MODELLING
+## LINEAR REGRESSION
+
+# First model
+
+```{r}
+# Model 1 - no heterogeneity and no controls
+model1 <- lm(log(weekly_views) ~ marketing_term + car_characteristic + mult_sales + balance + exclamation + separation + plus +log(title_length), data = otomoto_8)
+               
+#stargazer(model1)
+
+
+# Model 2 - no heterogeneity with controls
+model2 <- lm(log(weekly_views) ~   marketing_term + car_characteristic + mult_sales + balance + exclamation + separation + plus + log(title_length) + log(price) + brand, data = otomoto_8)
+               
+#stargazer(model2)
+
+
+# Model 3 - all controls and heterogeneity
+model3 <- lm(log(weekly_views) ~ (marketing_term + car_characteristic + mult_sales + balance + exclamation + separation + plus + log(title_length)  + log(price) + brand)*cluster, data = otomoto_8)
+               
+#stargazer(model3, type = "text")
+```
+
+
+
+## LATENT CLASS REGRESSION
+
+# Finding the right number of classes
+```{r}
+for (i in (1:7)){
+lcr1 <- flexmix(log(weekly_views) ~ mult_sales + sales + car + balance + log(title_length) + exclamation + separation + plus  + log(price) + brand + log(height) + log(length) + log(width), data = otomoto_8, k = i, control = list(verb = 0, iter = 1000))
+
+print(summary(lcr1))
+}
+```
+
+
+
+# First model - Two classes 
+```{r}
+set.seed(100)
+
+
+# First latent class regression model - no controls
+lcr1 <- flexmix(log(weekly_views) ~ marketing_term + car_characteristic + mult_sales + balance + exclamation + separation + plus + log(title_length) + log(height) + log(length) + log(width), data = otomoto_8, k = 2, control = list(verb = 0, iter = 1000))
+
+m1 <- refit(lcr1)
+
+summary(m1)
+summary(lcr1)
+
+
+
+# Second latent class regression model - with controls
+lcr2 <- flexmix(log(weekly_views) ~ marketing_term + car_characteristic + mult_sales + balance + exclamation + separation + plus + log(title_length) + brand + log(price)  + log(height) + log(length) + log(width), data = otomoto_8, k = 2, control = list(verb = 0, iter = 1000))
+
+
+m2 <- refit(lcr2)
+
+summary(m2)
+summary(lcr2)
+```
+
+
+
+```{r}
+otomoto_8$log_views <- log(otomoto_8$weekly_views)
+
+
+set.seed(123)
+
+# Test and train split
+training.samples <- otomoto_8$log_views %>%
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- otomoto_8[training.samples, ]
+test.data <- otomoto_8[-training.samples, ]
+
+
+# Models to be used - model1, model2, model3, lcr2, lcr1
+
+
+
+# Make predictions and compute the R2, RMSE and MAE - for the linear regression
+
+predictions <- model1 %>% predict(test.data)
+
+sum1 <- data.frame( R2 = R2(predictions, test.data$log_views),
+            RMSE = RMSE(predictions, test.data$log_views),
+            MAE = MAE(predictions, test.data$log_views))
+
+sum1$model <- "lin_reg_1"
+
+
+
+predictions <- model2 %>% predict(test.data)
+
+sum2 <- data.frame( R2 = R2(predictions, test.data$log_views),
+            RMSE = RMSE(predictions, test.data$log_views),
+            MAE = MAE(predictions, test.data$log_views))
+
+sum2$model = "lin_reg_2"
+
+
+predictions <- model3 %>% predict(test.data)
+
+sum3 <- data.frame( R2 = R2(predictions, test.data$log_views),
+            RMSE = RMSE(predictions, test.data$log_views),
+            MAE = MAE(predictions, test.data$log_views))
+
+sum3$model = "lin_reg_3"
+
+
+# Make predictions and compute the R2, RMSE and MAE - for the latent class reg
+
+# Latent Class Model 1 - no controls
+predictions <- predict(lcr1, test.data)
+joined <- cbind(test.data, predictions)
+
+post_probs <- as.data.frame(posterior(lcr1, test.data))
+joined <- cbind(joined, post_probs)
+joined$final_pred <- joined$Comp.1 * joined$V1 + joined$Comp.2 * joined$V2
+
+sum4 <- data.frame( R2 = R2(joined$final_pred, test.data$log_views),
+            RMSE = RMSE(joined$final_pred, test.data$log_views),
+            MAE = MAE(joined$final_pred, test.data$log_views))
+
+sum4$model <- "latent_reg_1"
+
+
+# Latent Class Model 2 - with controls
+
+predictions <- predict(lcr2, test.data)
+joined <- cbind(test.data, predictions)
+
+post_probs <- as.data.frame(posterior(lcr2, test.data))
+joined <- cbind(joined, post_probs)
+joined$final_pred <- joined$Comp.1 * joined$V1 + joined$Comp.2 * joined$V2
+
+sum5 <- data.frame( R2 = R2(joined$final_pred, test.data$log_views),
+            RMSE = RMSE(joined$final_pred, test.data$log_views),
+            MAE = MAE(joined$final_pred, test.data$log_views))
+
+sum5$model <- "latent_reg_2"
+
+
+full_summary <- rbind(sum1, sum2, sum3, sum4, sum5)
+```
+
+
+# Presecriptive Analysis
+```{r}
+predictions <- predict(lcr2, otomoto_8)
+post_probs <- as.data.frame(posterior(lcr2, otomoto_8))
+joined <- cbind(otomoto_8, predictions)
+joined <- cbind(joined, post_probs)
+joined$final_pred <- joined$Comp.1 * joined$V1 + joined$Comp.2 * joined$V2
+
+
+joined2 <- joined %>% arrange(., desc(V1))
+joined2[,8:15] <- NULL
+joined2$ad_id <- NULL
+joined2$create_date <- NULL
+joined2$phones <- NULL
+joined2$messages <- NULL
+joined2$title2 <- NULL
+
+
+
+otomoto_presc <- otomoto_8
+otomoto_presc$car_type <- NULL
+otomoto_presc$brand <- NULL
+otomoto_presc$create_date <- NULL
+otomoto_presc$car <- NULL
+otomoto_presc$sales <- NULL
+otomoto_presc[,4:6] <- NULL
+otomoto_presc[,7:9] <- NULL
+otomoto_presc$not_core <- NULL
+otomoto_presc$title_length2 <- NULL
+otomoto_presc <- cbind(otomoto_presc, otomoto_8$brand)
+colnames(otomoto_presc)[17] <- "brand"
+otomoto_presc$log_views <- NULL
+
+# Adding a optimal listing for Class 2
+
+df<-data.frame(10000000000,mean(otomoto_presc$price), 100, mean(otomoto_presc$height), mean(otomoto_presc$length), mean(otomoto_presc$width), 0, 0, 0, 0, 0, max(otomoto_presc$plus), 61, "sale", "rims", "Toyota")
+
+colnames(df) <- colnames(otomoto_presc)
+otomoto_presc <- rbind(df, otomoto_presc)
+
+
+# Adding a optimal listing for Class 1
+
+df_1<-data.frame(1000000000000,mean(otomoto_presc$price), 100, mean(otomoto_presc$height), mean(otomoto_presc$length), mean(otomoto_presc$width), 0, 4, 0, 0, 0, 0, mean(otomoto_presc$title_length), 0, 0, "Toyota")
+
+
+colnames(df_1) <- colnames(otomoto_presc)
+otomoto_presc <- rbind(df_1, otomoto_presc)
+```
+
+```{r}
+joined %>% group_by(car_type) %>% summarise(comp1 = mean(V1), comp2 = mean(V2))
+```
+
+
+
+
+
+
+```{r}
+# New LCR estimation
+
+lcr_presc <- flexmix(log(weekly_views) ~ marketing_term + car_characteristic + mult_sales + balance + exclamation + separation + plus + log(title_length) + brand + log(price)  + log(height) + log(length) + log(width), data = otomoto_presc, k = 2, control = list(verb = 0, iter = 1000))
+
+# Components flipped - use flipped ones for the results table
+
+m_presc <- refit(lcr_presc)
+
+summary(m_presc)
+summary(lcr_presc)
+
+predictions <- predict(lcr_presc, otomoto_presc)
+joined <- cbind(otomoto_presc, predictions)
+
+post_probs <- as.data.frame(posterior(lcr_presc, otomoto_presc))
+joined <- cbind(joined, post_probs)
+joined$final_pred <- joined$Comp.1 * joined$V1 + joined$Comp.2 * joined$V2
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## CALCULATING AVERAGES FOR THE FIRST 14 DAYS
+
+```{r}
+otomoto[,32:61] <- NULL
+otomoto <- joined2
+colnames(otomoto)[2] <- "create_date"
+colnames(otomoto)[4] <- "ad_id"
+colnames(otomoto)[18] <- "otomoto_daily_visits"
+
+otomoto_1 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(1:1))
+mean(otomoto_1$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_2 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(2:2))
+mean(otomoto_2$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_3 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(3:3))
+mean(otomoto_3$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_4 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(4:4))
+mean(otomoto_4$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_5 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(5:5))
+mean(otomoto_5$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_6 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(6:6))
+mean(otomoto_6$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_7 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(7:7))
+mean(otomoto_7$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_8 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(8:8))
+mean(otomoto_8$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_9 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(9:9))
+mean(otomoto_9$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_10 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(10:10))
+mean(otomoto_10$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_11 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(11:11))
+mean(otomoto_11$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_12 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(12:12))
+mean(otomoto_12$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_13 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(13:13))
+mean(otomoto_13$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_14 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(14:14))
+mean(otomoto_14$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_15 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(15:15))
+mean(otomoto_15$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_16 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(16:16))
+mean(otomoto_16$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_17 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(17:17))
+mean(otomoto_17$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_18 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(18:18))
+mean(otomoto_18$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_19 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(19:19))
+mean(otomoto_19$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_20 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(20:20))
+mean(otomoto_20$otomoto_daily_visits, na.rm = TRUE)
+
+otomoto_21 <- otomoto %>% arrange(create_date) %>% group_by(ad_id) %>% slice(c(21:21))
+mean(otomoto_21$otomoto_daily_visits, na.rm = TRUE)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+## IMPORTANT
+
+# Finding the most frequently occurring words
+
+
+
+```{r}
+otomoto_8 <- subset(otomoto_7, otomoto_7$create_date < '2019-12-31 23:13:43')
+otomoto_8 <- subset(otomoto_8, otomoto_8$weekly_views > 0)
+```
+
+
+```{r}
+otomoto_8$not_core <- sub(".*km ", "", otomoto_8$title2)
+
+stringz <- paste(otomoto_8$not_core, collapse = " ")
+```
+
+```{r}
+word_count <- function(test_sentence) {
+unnest_tokens(data.frame(sentence = test_sentence, 
+    stringsAsFactors = FALSE), word, sentence) %>% 
+count(word, sort = TRUE)
+}
+
+word_count(stringz)
+
+
+words <- word_count(stringz)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
